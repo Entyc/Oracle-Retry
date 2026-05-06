@@ -44,22 +44,29 @@ jobs:
           curl -s \
             --form-string "token=${{ secrets.PUSHOVER_APP_TOKEN }}" \
             --form-string "user=${{ secrets.PUSHOVER_USER_KEY }}" \
-            --form-string "message=Still trying to provision your Oracle ARM instance. Will keep retrying every 30 minutes." \
+            --form-string "message=Still trying to provision your Oracle ARM instance. Will keep retrying every 15 minutes." \
             --form-string "title=Oracle Retry - Still Running" \
             --form-string "priority=0" \
             https://api.pushover.net/1/messages.json
           echo "Daily status notification sent!"
 
       - name: Apply Stack
-        if: github.event.schedule == '*/30 * * * *' || github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' || github.event.schedule == '*/15 * * * *'
         run: |
-          JOB=$(oci resource-manager job create-apply-job \
+          RESPONSE=$(oci resource-manager job create-apply-job \
             --stack-id ${{ secrets.STACK_ID }} \
             --execution-plan-strategy AUTO_APPROVED \
-            2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['id'])")
+            2>/dev/null || echo "")
+
+          if [ -z "$RESPONSE" ]; then
+            echo "Failed to create job - rate limited or capacity unavailable"
+            exit 0
+          fi
+
+          JOB=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['id'])" 2>/dev/null || echo "")
 
           if [ -z "$JOB" ]; then
-            echo "Failed to create job - rate limited or capacity unavailable"
+            echo "Could not parse job ID - capacity unavailable"
             exit 0
           fi
 
@@ -68,7 +75,7 @@ jobs:
 
           STATUS=$(oci resource-manager job get \
             --job-id $JOB \
-            2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['lifecycle-state'])")
+            2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['lifecycle-state'])" 2>/dev/null || echo "UNKNOWN")
 
           echo "Job status: $STATUS"
 
@@ -82,5 +89,5 @@ jobs:
               https://api.pushover.net/1/messages.json
             echo "SUCCESS - Notification sent!"
           else
-            echo "Not successful yet - will retry in 30 minutes"
+            echo "Not successful yet - will retry in 15 minutes"
           fi

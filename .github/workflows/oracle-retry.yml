@@ -1,0 +1,86 @@
+name: Oracle ARM Retry
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+
+jobs:
+  retry:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install OCI CLI
+        run: pip install oci-cli
+
+      - name: Configure OCI
+        run: |
+          mkdir -p ~/.oci
+          echo "[DEFAULT]" > ~/.oci/config
+          echo "user=${{ secrets.OCI_USER_OCID }}" >> ~/.oci/config
+          echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/config
+          echo "tenancy=${{ secrets.OCI_TENANCY_OCID }}" >> ~/.oci/config
+          echo "region=${{ secrets.OCI_REGION }}" >> ~/.oci/config
+          echo "key_file=~/.oci/oci_api_key.pem" >> ~/.oci/config
+          echo "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/config
+
+      - name: Send test notification
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          curl -s \
+            --form-string "token=${{ secrets.PUSHOVER_APP_TOKEN }}" \
+            --form-string "user=${{ secrets.PUSHOVER_USER_KEY }}" \
+            --form-string "message=GitHub Actions is connected and working! Oracle retry script is running." \
+            --form-string "title=Oracle Retry - Test" \
+            --form-string "priority=0" \
+            https://api.pushover.net/1/messages.json
+          echo "Test notification sent!"
+
+      - name: Daily status notification
+        if: github.event.schedule == '0 9 * * *'
+        run: |
+          curl -s \
+            --form-string "token=${{ secrets.PUSHOVER_APP_TOKEN }}" \
+            --form-string "user=${{ secrets.PUSHOVER_USER_KEY }}" \
+            --form-string "message=Still trying to provision your Oracle ARM instance. Will keep retrying every 30 minutes." \
+            --form-string "title=Oracle Retry - Still Running" \
+            --form-string "priority=0" \
+            https://api.pushover.net/1/messages.json
+          echo "Daily status notification sent!"
+
+      - name: Apply Stack
+        if: github.event.schedule == '*/30 * * * *' || github.event_name == 'workflow_dispatch'
+        run: |
+          JOB=$(oci resource-manager job create-apply-job \
+            --stack-id ${{ secrets.STACK_ID }} \
+            --execution-plan-strategy AUTO_APPROVED \
+            2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['id'])")
+
+          if [ -z "$JOB" ]; then
+            echo "Failed to create job - rate limited or capacity unavailable"
+            exit 0
+          fi
+
+          echo "Job created: $JOB"
+          sleep 60
+
+          STATUS=$(oci resource-manager job get \
+            --job-id $JOB \
+            2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['lifecycle-state'])")
+
+          echo "Job status: $STATUS"
+
+          if [ "$STATUS" = "SUCCEEDED" ]; then
+            curl -s \
+              --form-string "token=${{ secrets.PUSHOVER_APP_TOKEN }}" \
+              --form-string "user=${{ secrets.PUSHOVER_USER_KEY }}" \
+              --form-string "message=Your Oracle ARM instance is ready! Go check the console." \
+              --form-string "title=Oracle Cloud" \
+              --form-string "priority=1" \
+              https://api.pushover.net/1/messages.json
+            echo "SUCCESS - Notification sent!"
+          else
+            echo "Not successful yet - will retry in 30 minutes"
+          fi
